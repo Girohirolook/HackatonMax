@@ -1,0 +1,14 @@
+# dependencies
+node_modules
+
+# builds
+dist
+
+# env
+.env
+*.local
+.vscode
+.continue
+
+# prisma
+packages/database/prisma/migrations/**/migration_lock.toml.bak

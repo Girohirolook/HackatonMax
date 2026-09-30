@@ -1,0 +1,26 @@
+{
+  "name": "MaxHack",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "db:build": "pnpm --filter @app/database build",
+    "db:migrate": "pnpm --filter @app/database prisma:migrate",
+    "db:studio": "pnpm --filter @app/database prisma:studio",
+    "bot:dev": "pnpm db:build && pnpm --filter bot start:dev",
+    "web:dev": "pnpm --filter web dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.4.2",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.4.2",
+  "type": "module"
+}

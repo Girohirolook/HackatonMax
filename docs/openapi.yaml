@@ -1,0 +1,1068 @@
+openapi: 3.0.3
+info:
+  title: Volunteer API
+  description: |
+    REST API для платформы волонтёрских мероприятий в MAX.
+    Все запросы (кроме `GET /api/health`) требуют валидный `initData` 
+    из MAX WebApp для аутентификации пользователя.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3000
+    description: Локальный сервер разработки
+  - url: https://didntthinkofdomen.online
+    description: Продакшн-сервер
+
+tags:
+  - name: Health
+    description: Проверка работоспособности
+  - name: Auth
+    description: Аутентификация и управление профилем
+  - name: Upload
+    description: Загрузка файлов (документы)
+  - name: DaData
+    description: Подсказки и очистка адресов
+  - name: Events
+    description: Управление мероприятиями
+  - name: Applications
+    description: Заявки волонтёров
+  - name: Broadcast
+    description: Рассылки сообщений
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Проверка работоспособности сервера
+      responses:
+        '200':
+          description: Сервер работает
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/auth/check:
+    post:
+      tags: [Auth]
+      summary: Проверка текущего пользователя
+      description: Возвращает данные пользователя MAX и его профиль, если он уже зарегистрирован.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Результат проверки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация нового пользователя
+      description: Создаёт пользователя и профиль (волонтёр или организация).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/InitDataRequest'
+                - $ref: '#/components/schemas/RegisterDto'
+      responses:
+        '201':
+          description: Пользователь зарегистрирован
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  role: { type: string, enum: [volunteer, organization_creator] }
+                  maxBridgeId: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Пользователь уже зарегистрирован
+
+  /api/auth/profile:
+    patch:
+      tags: [Auth]
+      summary: Обновление профиля
+      description: Обновляет редактируемые поля профиля в зависимости от роли.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/InitDataRequest'
+                - $ref: '#/components/schemas/UpdateProfileDto'
+      responses:
+        '200':
+          description: Профиль обновлён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role: { type: string }
+                  updated: { type: boolean }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/auth/verify-contact:
+    post:
+      tags: [Auth]
+      summary: Сохранение номера телефона
+      description: Сохраняет номер телефона волонтёра, полученный через `window.WebApp.requestContact()`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, phone]
+              properties:
+                initData: { type: string }
+                phone: { type: string, example: "+79991234567" }
+      responses:
+        '200':
+          description: Телефон сохранён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  phone: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/auth/upload/documents:
+    post:
+      tags: [Upload]
+      summary: Загрузка документов организации
+      description: ZIP-архив или PDF до 20 МБ.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                initData:
+                  type: string
+      responses:
+        '200':
+          description: Файл загружен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  filename: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Файл слишком большой
+
+  /api/dadata/suggest:
+    post:
+      tags: [DaData]
+      summary: Подсказки адресов
+      description: |
+        Возвращает до 6 вариантов адреса по введённой строке. 
+        При сбое DaData возвращается `{ suggestions: [], degraded: true }`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, query]
+              properties:
+                initData: { type: string }
+                query: { type: string, example: "Москва Тверская" }
+      responses:
+        '200':
+          description: Список подсказок
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AddressVariant'
+                  degraded:
+                    type: boolean
+                    description: true если DaData недоступен
+
+  /api/dadata/clean:
+    post:
+      tags: [DaData]
+      summary: Очистка и нормализация адреса
+      description: |
+        Пытается нормализовать введённый адрес. 
+        При успехе возвращает `{ address: AddressVariant, degraded: false }`.
+        Если адрес не найден — `{ address: null, degraded: false }`.
+        При сбое DaData — `{ address: null, degraded: true }`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, address]
+              properties:
+                initData: { type: string }
+                address: { type: string }
+      responses:
+        '200':
+          description: Результат очистки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    allOf:
+                      - $ref: '#/components/schemas/AddressVariant'
+                    nullable: true
+                  degraded:
+                    type: boolean
+
+  /api/events/by-organization:
+    post:
+      tags: [Events]
+      summary: Мероприятия организации (до 5)
+      description: Блок последних мероприятий для профиля организации.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Список мероприятий
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventCard'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/events/my:
+    post:
+      tags: [Events]
+      summary: Мои мероприятия
+      description: |
+        Для организации — все её мероприятия.
+        Для волонтёра — мероприятия, на которые он записан.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Активные и прошедшие мероприятия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyEventsResponse'
+
+  /api/events/create:
+    post:
+      tags: [Events]
+      summary: Создание мероприятия
+      description: Доступно только пользователям с ролью `organization_creator`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/InitDataRequest'
+                - $ref: '#/components/schemas/CreateEventDto'
+      responses:
+        '201':
+          description: Мероприятие создано
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/events/details:
+    post:
+      tags: [Events]
+      summary: Детали мероприятия
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: Детали мероприятия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventDetails'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/events/register-for-event:
+    post:
+      tags: [Applications]
+      summary: Подать заявку на мероприятие
+      description: Волонтёр подаёт заявку со статусом `pending`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '201':
+          description: Заявка создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, approved]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/events/cancel-registration:
+    post:
+      tags: [Applications]
+      summary: Отменить свою запись
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: Запись отменена
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelled: { type: boolean }
+
+  /api/events/search:
+    post:
+      tags: [Events]
+      summary: Поиск мероприятий
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/InitDataRequest'
+                - $ref: '#/components/schemas/SearchFilters'
+      responses:
+        '200':
+          description: Результаты поиска
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EventCard'
+
+  /api/events/applications:
+    post:
+      tags: [Applications]
+      summary: Список заявок на мероприятие
+      description: Доступно только владельцу мероприятия.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: Список заявок
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applications:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApplicationItem'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/events/application-action:
+    post:
+      tags: [Applications]
+      summary: Одобрить или отклонить заявку
+      description: При одобрении волонтёру отправляется сообщение в MAX.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, registrationId, action]
+              properties:
+                initData: { type: string }
+                registrationId: { type: integer }
+                action:
+                  type: string
+                  enum: [approve, reject]
+      responses:
+        '200':
+          description: Заявка обработана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [approved, rejected]
+
+  /api/events/application-delete:
+    post:
+      tags: [Applications]
+      summary: Удалить заявку
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, registrationId]
+              properties:
+                initData: { type: string }
+                registrationId: { type: integer }
+      responses:
+        '200':
+          description: Заявка удалена
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+
+  /api/events/applications-approve-all:
+    post:
+      tags: [Applications]
+      summary: Одобрить все ожидающие заявки
+      description: Массовое одобрение + рассылка сообщений каждому волонтёру.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: Результат
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approved: { type: integer }
+                  sent: { type: integer }
+
+  /api/events/organization-profile:
+    post:
+      tags: [Events]
+      summary: Публичный профиль организации
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, organizationId]
+              properties:
+                initData: { type: string }
+                organizationId: { type: integer }
+      responses:
+        '200':
+          description: Профиль организации
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationProfileData'
+
+  /api/events/volunteer-home:
+    post:
+      tags: [Events]
+      summary: Главная страница волонтёра
+      description: Статистика, ближайшие записи и рекомендации.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Данные главной
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolunteerHomeResponse'
+
+  /api/events/organization-home:
+    post:
+      tags: [Events]
+      summary: Главная страница организации
+      description: Счётчики, активные мероприятия и статистика.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Данные главной
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationHomeResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/events/broadcast:
+    post:
+      tags: [Broadcast]
+      summary: Рассылка одобренным волонтёрам
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId, message]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+                message: { type: string }
+      responses:
+        '200':
+          description: Результат рассылки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: integer }
+                  total: { type: integer }
+
+  /api/events/broadcast-history:
+    post:
+      tags: [Broadcast]
+      summary: История рассылок по мероприятию
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: История
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BroadcastHistoryItem'
+
+  /api/events/update:
+    post:
+      tags: [Events]
+      summary: Обновление мероприятия
+      description: Доступно только владельцу мероприятия.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+              allOf:
+                - $ref: '#/components/schemas/CreateEventDto'
+      responses:
+        '200':
+          description: Мероприятие обновлено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+
+  /api/events/delete:
+    post:
+      tags: [Events]
+      summary: Удаление мероприятия
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData, eventId]
+              properties:
+                initData: { type: string }
+                eventId: { type: integer }
+      responses:
+        '200':
+          description: Мероприятие удалено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+
+  /api/events/bot-info:
+    post:
+      tags: [Events]
+      summary: Информация о боте
+      description: Возвращает username бота для формирования диплинков.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitDataRequest'
+      responses:
+        '200':
+          description: Информация о боте
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+                    nullable: true
+                    example: "volunteer_hub_bot"
+
+components:
+  schemas:
+    InitDataRequest:
+      type: object
+      required: [initData]
+      properties:
+        initData:
+          type: string
+          description: Подписанная строка initData из MAX WebApp
+
+    MaxUser:
+      type: object
+      properties:
+        id: { type: integer }
+        firstName: { type: string }
+        lastName: { type: string }
+        username: { type: string, nullable: true }
+        photoUrl: { type: string, nullable: true }
+
+    VolunteerProfile:
+      type: object
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        middleName: { type: string, nullable: true }
+        birthDate: { type: string, format: date-time }
+        city: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+
+    OrganizationProfile:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+        contacts: { type: string, nullable: true }
+        socialMediaLink: { type: string, nullable: true }
+        logoUrl: { type: string, nullable: true }
+        isOfficial: { type: boolean }
+        hasDocuments: { type: boolean }
+        city: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+
+    CheckResponse:
+      type: object
+      required: [isNewUser]
+      properties:
+        isNewUser:
+          type: boolean
+        maxUser:
+          $ref: '#/components/schemas/MaxUser'
+        user:
+          type: object
+          nullable: true
+          properties:
+            id: { type: integer }
+            role: { type: string, enum: [volunteer, organization_creator] }
+            maxBridgeId: { type: string }
+            volunteer:
+              $ref: '#/components/schemas/VolunteerProfile'
+              nullable: true
+            organization:
+              $ref: '#/components/schemas/OrganizationProfile'
+              nullable: true
+
+    RegisterDto:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [volunteer, organization_creator]
+        firstName: { type: string }
+        lastName: { type: string }
+        middleName: { type: string }
+        birthDate: { type: string, format: date }
+        city: { type: string }
+        address: { type: string }
+        phone: { type: string }
+        organizationName: { type: string }
+        description: { type: string }
+        contacts: { type: string }
+        socialMediaLink: { type: string }
+        logoUrl: { type: string }
+        documentsZipFilename: { type: string }
+
+    UpdateProfileDto:
+      type: object
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        middleName: { type: string }
+        birthDate: { type: string, format: date }
+        organizationName: { type: string }
+        description: { type: string }
+        contacts: { type: string }
+        socialMediaLink: { type: string }
+        logoUrl: { type: string }
+        city: { type: string }
+        address: { type: string }
+
+    AddressVariant:
+      type: object
+      properties:
+        value:
+          type: string
+          example: "г Москва, ул Тверская, д 1"
+        city:
+          type: string
+          nullable: true
+          example: "Москва"
+
+    EventCard:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        organizationalDetails: { type: string, nullable: true }
+        criteria: { type: string, nullable: true }
+        city: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        eventDate: { type: string, format: date-time }
+        endTime: { type: string, format: date-time, nullable: true }
+        minAge: { type: integer, nullable: true }
+        requiredVolunteersCount: { type: integer }
+        registeredCount: { type: integer }
+        status:
+          type: string
+          enum: [upcoming, ongoing, completed]
+        photos:
+          type: array
+          items: { type: string }
+        registrationStatus:
+          type: string
+          nullable: true
+          enum: [pending, approved, rejected, completed]
+        pendingCount:
+          type: integer
+          nullable: true
+
+    EventDetails:
+      allOf:
+        - $ref: '#/components/schemas/EventCard'
+        - type: object
+          properties:
+            organization:
+              type: object
+              properties:
+                id: { type: integer }
+                name: { type: string }
+                logoUrl: { type: string, nullable: true }
+                isOfficial: { type: boolean }
+            freeSlots: { type: integer }
+            registration:
+              type: object
+              nullable: true
+              properties:
+                status: { type: string }
+                registeredAt: { type: string, format: date-time }
+            isOwner: { type: boolean }
+
+    CreateEventDto:
+      type: object
+      required: [name, address, eventDate]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        organizationalDetails: { type: string }
+        criteria: { type: string }
+        city: { type: string }
+        address: { type: string }
+        requiredVolunteersCount: { type: integer, minimum: 1 }
+        eventDate: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        minAge: { type: integer, minimum: 0 }
+        photos:
+          type: array
+          items: { type: string }
+          maxItems: 6
+
+    SearchFilters:
+      type: object
+      properties:
+        query: { type: string }
+        city: { type: string }
+        fromDate: { type: string, format: date }
+        toDate: { type: string, format: date }
+        minAge: { type: integer }
+        hasFreeSlots: { type: boolean }
+        sortBy:
+          type: string
+          enum: [date, freeSlots, createdAt]
+        sortOrder:
+          type: string
+          enum: [asc, desc]
+
+    MyEventsResponse:
+      type: object
+      properties:
+        role: { type: string }
+        active:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventCard'
+        past:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventCard'
+
+    ApplicationItem:
+      type: object
+      properties:
+        id: { type: integer }
+        status:
+          type: string
+          enum: [pending, approved, rejected, completed]
+        registeredAt: { type: string, format: date-time }
+        volunteer:
+          type: object
+          properties:
+            firstName: { type: string }
+            lastName: { type: string }
+            middleName: { type: string, nullable: true }
+            city: { type: string }
+            address: { type: string, nullable: true }
+            participationsCount: { type: integer }
+            phone: { type: string, nullable: true }
+
+    OrganizationProfileData:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        contacts: { type: string, nullable: true }
+        socialMediaLink: { type: string, nullable: true }
+        logoUrl: { type: string, nullable: true }
+        isOfficial: { type: boolean }
+        city: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventCard'
+
+    VolunteerHomeResponse:
+      type: object
+      properties:
+        daysSinceRegistration: { type: integer }
+        participationsCount: { type: integer }
+        myEvents:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventCard'
+        recommendations:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/EventCard'
+              - type: object
+                properties:
+                  organizationName: { type: string }
+
+    OrganizationHomeResponse:
+      type: object
+      properties:
+        activeEventsCount: { type: integer }
+        pendingApplicationsCount: { type: integer }
+        activeEvents:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventCard'
+        stats:
+          type: object
+          properties:
+            fillRate: { type: integer }
+            avgFillDays: { type: integer, nullable: true }
+            repeatVolunteersPercent: { type: integer }
+
+    BroadcastHistoryItem:
+      type: object
+      properties:
+        id: { type: integer }
+        text: { type: string }
+        sentCount: { type: integer }
+        totalCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+        statusCode: { type: integer }
+
+  responses:
+    BadRequest:
+      description: Ошибка валидации
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Невалидный initData
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Нет прав на действие
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

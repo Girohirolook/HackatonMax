@@ -1,0 +1,19 @@
+# VCS
+.git
+.gitignore
+
+# Зависимости и сборки (генерируются внутри Docker при сборке образов)
+**/node_modules
+**/dist
+**/.vite
+
+# Env-файлы (секреты не должны попадать в образы; в контейнеры передаются
+# через env_file / environment в docker-compose на этапе запуска)
+**/.env
+**/.env.local
+**/*.local
+
+# Служебные файлы (в сборке образов не участвуют)
+docker-compose*.yaml
+docker-compose*.yml
+README.md

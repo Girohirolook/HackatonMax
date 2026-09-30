@@ -1,0 +1,1114 @@
+# =====================================================================
+# DATA-API.yaml — описание API решения для платформы оценки
+# Сервер: NestJS (apps/bot), все маршруты приложения — под префиксом /api
+# =====================================================================
+
+# 1. Версия конфигурации (схемы файла)
+version: "1.0"
+
+# 2. Наименование решения / идентификатор команды
+solution:
+  name: "Волонтёры MAX — мини-приложение для волонтёрской деятельности"
+  team_id: "TEAM_ID"            # ← заменить на выданный идентификатор команды
+  description: >
+    Мини-приложение и чат-бот в мессенджере MAX. Организации создают мероприятия,
+    волонтёры находят их и подают заявки, организатор одобряет заявки и рассылает
+    уведомления одобренным волонтёрам через бота MAX.
+
+# 3. Базовый адрес API (все пути в checks указаны относительно него)
+base_url: "https://didntthinkofdomen.online/api"   # ← тот же домен, что WEBHOOK_DOMAIN, порт 443
+
+# ---------------------------------------------------------------------
+# Аутентификация
+# ---------------------------------------------------------------------
+auth:
+  type: max_init_data
+  description: >
+    Пользователь аутентифицируется строкой initData (window.WebApp.initData), которую
+    MAX передаёт мини-приложению при запуске. Строка передаётся в ТЕЛЕ запроса в поле
+    initData (не в заголовке). Сервер проверяет подпись по алгоритму
+    https://dev.max.ru/docs/webapps/validation:
+    secret_key = HMAC-SHA256(key="WebAppData", msg=BOT_TOKEN);
+    hash = hex(HMAC-SHA256(secret_key, launch_params)), где launch_params — пары key=value
+    без hash, URL-декодированные, отсортированные по ключу и соединённые через "\n".
+    Срок годности auth_date сервер не проверяет, поэтому заранее подписанные строки
+    тестовых учётных записей действуют всё время проверки.
+  location: body
+  field: initData
+  applies_to_content_types: [application/json, multipart/form-data]
+  on_failure:
+    status: 401
+    message: "Невалидные данные MAX Bridge"
+
+# ---------------------------------------------------------------------
+# 7. Роли тестовых учётных записей
+# ---------------------------------------------------------------------
+roles:
+  anonymous:
+    description: "Без авторизации, initData не передаётся"
+  new_user:
+    description: >
+      Пользователь MAX, ещё не зарегистрированный в приложении. Нужен для проверки
+      регистрации; после успешного прогона становится зарегистрированным, поэтому
+      для каждого прогона требуется initData с новым user.id.
+    init_data: "${INIT_DATA_NEW_USER}"
+  volunteer:
+    description: "Зарегистрированный волонтёр (role = volunteer), возраст 18+"
+    init_data: "${INIT_DATA_VOLUNTEER}"
+  organization_creator:
+    description: "Зарегистрированная организация (role = organization_creator)"
+    init_data: "${INIT_DATA_ORGANIZATION}"
+
+# Значения, которые подставляются в запросы из ответов предыдущих проверок
+variables:
+  event_id:          { capture_from: events_create,        jsonpath: "$.id" }
+  organization_id:   { capture_from: events_details,       jsonpath: "$.organization.id" }
+  registration_id:   { capture_from: events_applications,  jsonpath: "$.applications[0].id" }
+  registration_id_2: { capture_from: events_applications_2, jsonpath: "$.applications[0].id" }
+
+# Значения запроса по умолчанию (если в проверке не переопределены)
+defaults:
+  request:
+    headers:
+      Content-Type: application/json
+      Accept: application/json
+  timeout_ms: 10000
+
+# ---------------------------------------------------------------------
+# 4. Перечень обязательных проверок (основная функциональность)
+# ---------------------------------------------------------------------
+required_checks:
+  - health
+  - auth_check_new_user
+  - auth_check_volunteer
+  - auth_register_volunteer
+  - events_create
+  - events_search
+  - events_details
+  - events_register
+  - events_my_volunteer
+  - events_my_organization
+  - events_applications
+  - events_application_approve
+  - events_broadcast
+  - volunteer_home
+  - organization_home
+  - events_update
+  - events_delete
+
+# ---------------------------------------------------------------------
+# Общие схемы ответов
+# ---------------------------------------------------------------------
+components:
+  error_formats:
+    nest_default:
+      applies_to: ["/auth/check", "/auth/register", "/auth/profile", "/auth/verify-contact", "/dadata/*"]
+      content_type: application/json
+      schema:
+        type: object
+        required: [statusCode, message]
+        properties:
+          statusCode: { type: integer }
+          message:    { type: [string, array] }
+          error:      { type: string }
+    upload_filter:
+      applies_to: ["/events/*", "/auth/upload/*", "/uploads/*"]
+      content_type: application/json
+      schema:
+        type: object
+        required: [message]
+        properties:
+          message: { type: string }
+
+  schemas:
+    EventCard:
+      type: object
+      required: [id, name, description, organizationalDetails, criteria, city, address,
+                 eventDate, endTime, minAge, requiredVolunteersCount,
+                 registeredCount, status, photos, registrationStatus]
+      properties:
+        id:                      { type: integer }
+        name:                    { type: string }
+        description:             { type: [string, "null"] }
+        organizationalDetails:   { type: [string, "null"] }
+        criteria:                { type: [string, "null"] }
+        city:                    { type: [string, "null"] }
+        address:                 { type: [string, "null"] }
+        eventDate:               { type: string, format: date-time }
+        endTime:                 { type: [string, "null"], format: date-time }
+        minAge:                  { type: [integer, "null"] }
+        requiredVolunteersCount: { type: integer, minimum: 1 }
+        registeredCount:         { type: integer, minimum: 0 }
+        status:                  { type: string, enum: [upcoming, ongoing, completed] }
+        photos:                  { type: array, maxItems: 4, items: { type: string } }
+        registrationStatus:      { type: [string, "null"], enum: [pending, approved, rejected, completed, null] }
+        pendingCount:            { type: integer, description: "Только в /events/my для организации" }
+
+    MaxUserShort:
+      type: object
+      required: [id, firstName, lastName, username, photoUrl]
+      properties:
+        id:        { type: integer }
+        firstName: { type: string }
+        lastName:  { type: string }
+        username:  { type: [string, "null"] }
+        photoUrl:  { type: [string, "null"] }
+
+    VolunteerProfile:
+      type: object
+      required: [firstName, lastName, middleName, birthDate, city, address]
+      properties:
+        firstName:  { type: string }
+        lastName:   { type: string }
+        middleName: { type: [string, "null"] }
+        birthDate:  { type: string, format: date-time }
+        city:       { type: [string, "null"] }
+        address:    { type: [string, "null"] }
+
+    OrganizationProfile:
+      type: object
+      required: [name, description, contacts, socialMediaLink, logoUrl, isOfficial,
+                 hasDocuments, city, address]
+      properties:
+        name:            { type: string }
+        description:     { type: [string, "null"] }
+        contacts:        { type: [string, "null"] }
+        socialMediaLink: { type: [string, "null"] }
+        logoUrl:         { type: [string, "null"] }
+        isOfficial:      { type: boolean }
+        hasDocuments:    { type: boolean }
+        city:            { type: [string, "null"] }
+        address:         { type: [string, "null"] }
+
+    AddressVariant:
+      type: object
+      required: [value, city]
+      properties:
+        value:     { type: string }
+        city:      { type: [string, "null"] }
+
+# =====================================================================
+# 5–9. Проверки (выполняются в указанном порядке)
+# =====================================================================
+checks:
+
+  # ------------------------- Служебные -------------------------------
+  - id: health
+    name: "Доступность сервиса и базы данных"
+    required: true
+    method: GET
+    path: /health
+    role: anonymous
+    request:
+      headers: { Accept: application/json }
+    expected_status: [200]
+    possible_errors: { 500: "Нет соединения с БД" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          status:     { type: string, const: ok }
+      required_fields: [status]
+
+  - id: bot_info
+    name: "Username бота MAX (для диплинков)"
+    required: false
+    method: POST
+    path: /events/bot-info
+    role: anonymous
+    request:
+      body: {}
+    expected_status: [200]
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          username: { type: [string, "null"] }
+      required_fields: [username]
+
+  # ------------------------- Авторизация -----------------------------
+  - id: auth_check_new_user
+    name: "Проверка пользователя: новый пользователь"
+    required: true
+    method: POST
+    path: /auth/check
+    role: new_user
+    request:
+      body:
+        initData: "${INIT_DATA_NEW_USER}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          isNewUser: { type: boolean, const: true }
+          maxUser:   { $ref: "#/components/schemas/MaxUserShort" }
+      required_fields: [isNewUser, maxUser, maxUser.id, maxUser.firstName, maxUser.lastName]
+
+  - id: auth_check_volunteer
+    name: "Проверка пользователя: зарегистрированный волонтёр"
+    required: true
+    method: POST
+    path: /auth/check
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          isNewUser: { type: boolean, const: false }
+          user:
+            type: object
+            required: [id, role, maxBridgeId, volunteer, organization]
+            properties:
+              id:           { type: integer }
+              role:         { type: string, enum: [volunteer, organization_creator] }
+              maxBridgeId:  { type: string }
+              volunteer:    { oneOf: [ { $ref: "#/components/schemas/VolunteerProfile" }, { type: "null" } ] }
+              organization: { oneOf: [ { $ref: "#/components/schemas/OrganizationProfile" }, { type: "null" } ] }
+      required_fields: [isNewUser, user.id, user.role, user.maxBridgeId, user.volunteer]
+
+  - id: auth_check_invalid
+    name: "Отказ при поддельном initData"
+    required: false
+    method: POST
+    path: /auth/check
+    role: anonymous
+    request:
+      body:
+        initData: "user=%7B%22id%22%3A1%7D&auth_date=1700000000&hash=deadbeef"
+    expected_status: [401]
+    response:
+      content_type: application/json
+      error_format: nest_default
+      required_fields: [statusCode, message]
+
+  - id: auth_register_volunteer
+    name: "Регистрация волонтёра"
+    required: true
+    method: POST
+    path: /auth/register
+    role: new_user
+    request:
+      body:
+        initData: "${INIT_DATA_NEW_USER}"
+        role: volunteer                 # volunteer | organization_creator
+        firstName: "Иван"
+        lastName: "Тестов"
+        middleName: "Иванович"
+        birthDate: "2000-05-15"
+        city: "Москва"
+        address: "г Москва, ул Тверская, д 1"
+      body_notes: >
+        Для role=organization_creator обязательны organizationName и address;
+        необязательны description, contacts, socialMediaLink, logoUrl,
+        documentsZipFilename, city.
+    expected_status: [201]
+    possible_errors:
+      400: "Не заполнены обязательные поля или неизвестная роль"
+      401: "Невалидная подпись initData"
+      409: "Пользователь уже зарегистрирован"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          id:          { type: integer }
+          role:        { type: string, enum: [volunteer, organization_creator] }
+          maxBridgeId: { type: string }
+      required_fields: [id, role, maxBridgeId]
+
+  - id: auth_register_duplicate
+    name: "Повторная регистрация запрещена"
+    required: false
+    depends_on: [auth_register_volunteer]
+    method: POST
+    path: /auth/register
+    role: new_user
+    request:
+      body:
+        initData: "${INIT_DATA_NEW_USER}"
+        role: volunteer
+        firstName: "Иван"
+        lastName: "Тестов"
+        birthDate: "2000-05-15"
+        address: "г Москва, ул Тверская, д 1"
+    expected_status: [409]
+    response:
+      content_type: application/json
+      error_format: nest_default
+      required_fields: [statusCode, message]
+
+  - id: auth_update_profile
+    name: "Редактирование профиля волонтёра"
+    required: false
+    method: PATCH
+    path: /auth/profile
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        firstName: "Иван"
+        lastName: "Тестов"
+        city: "Москва"
+        address: "г Москва, ул Тверская, д 1"
+      body_notes: >
+        Все поля необязательны. Волонтёр: firstName, lastName, middleName, birthDate.
+        Организация: organizationName, description, contacts, socialMediaLink, logoUrl.
+        Общие: city, address.
+    expected_status: [200]
+    possible_errors:
+      400: "Пустые обязательные поля профиля"
+      401: "Невалидная подпись initData"
+      404: "Пользователь не зарегистрирован"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          role:    { type: string }
+          updated: { type: boolean, const: true }
+      required_fields: [role, updated]
+
+  - id: auth_verify_contact
+    name: "Привязка телефона (данные window.WebApp.requestContact)"
+    required: false
+    method: POST
+    path: /auth/verify-contact
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        phone: "${CONTACT_PHONE}"
+        authDate: "${CONTACT_AUTH_DATE}"
+        hash: "${CONTACT_HASH}"      # hex(HMAC-SHA256(BOT_TOKEN, "authDate=..\nphone=..\nuserId=.."))
+    expected_status: [200]
+    possible_errors:
+      400: "Неполные данные / подпись контакта неверна / пользователь не волонтёр"
+      401: "Невалидная подпись initData"
+      404: "Пользователь не найден"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          success: { type: boolean, const: true }
+          phone:   { type: string }
+      required_fields: [success, phone]
+
+  # ------------------------- Адреса (DaData) -------------------------
+  - id: dadata_suggest
+    name: "Подсказки адреса"
+    required: false
+    method: POST
+    path: /dadata/suggest
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        query: "Москва Тверская"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          suggestions: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/AddressVariant" } }
+          degraded:    { type: boolean, description: "true — сбой DaData, список пуст" }
+      required_fields: [suggestions, degraded]
+
+  - id: dadata_clean
+    name: "Нормализация адреса"
+    required: false
+    method: POST
+    path: /dadata/clean
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        address: "мск тверская 1"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          address:  { oneOf: [ { $ref: "#/components/schemas/AddressVariant" }, { type: "null" } ] }
+          degraded: { type: boolean }
+      required_fields: [address, degraded]
+
+  # ------------------------- Загрузка файлов -------------------------
+  - id: upload_documents
+    name: "Загрузка документов организации (ZIP/PDF до 20 МБ)"
+    required: false
+    method: POST
+    path: /auth/upload/documents
+    role: organization_creator
+    request:
+      headers: { Content-Type: multipart/form-data }
+      body:
+        content_type: multipart/form-data
+        fields:
+          initData: "${INIT_DATA_ORGANIZATION}"
+        files:
+          file: { path: "fixtures/docs.pdf", mime: application/pdf }
+    expected_status: [201]
+    possible_errors:
+      400: "Не ZIP/PDF или файл не передан"
+      401: "Невалидная подпись initData"
+      413: "Файл больше 20 МБ"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          filename: { type: string, pattern: "^docs-" }
+      required_fields: [filename]
+
+  # ------------------------- Мероприятия: организация ----------------
+  - id: events_create
+    name: "Создание мероприятия"
+    required: true
+    method: POST
+    path: /events/create
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        name: "Субботник в парке"
+        description: "Уборка территории парка"
+        organizationalDetails: "Сбор у главного входа, перчатки выдадим"
+        criteria: "Удобная одежда"
+        city: "Москва"
+        address: "г Москва, ул Тверская, д 1"
+        requiredVolunteersCount: 5
+        eventDate: "2027-06-01T10:00:00+03:00"
+        endTime: "2027-06-01T14:00:00+03:00"
+      body_notes: "Обязательны: name, address, eventDate (ISO 8601). minAge не задаём, чтобы волонтёр прошёл по возрасту."
+    expected_status: [201]
+    possible_errors:
+      400: "Нет названия / даты / адреса или requiredVolunteersCount < 1"
+      401: "Невалидная подпись initData"
+      403: "Создавать мероприятия могут только организации"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          id: { type: integer }
+      required_fields: [id]
+
+  - id: events_create_forbidden
+    name: "Волонтёр не может создать мероприятие"
+    required: false
+    method: POST
+    path: /events/create
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        name: "Тест"
+        address: "г Москва"
+        eventDate: "2027-06-01T10:00:00+03:00"
+    expected_status: [403]
+    response:
+      content_type: application/json
+      error_format: upload_filter
+      required_fields: [message]
+
+  - id: events_by_organization
+    name: "Мероприятия в профиле организации (до 5)"
+    required: false
+    method: POST
+    path: /events/by-organization
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Организация не найдена" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          total:  { type: integer }
+          events: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/EventCard" } }
+      required_fields: [total, events]
+
+  # ------------------------- Мероприятия: волонтёр -------------------
+  - id: events_search
+    name: "Поиск мероприятий"
+    required: true
+    method: POST
+    path: /events/search
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        query: "Субботник"            # необязательно
+        city: "Москва"                # необязательно
+        fromDate: null                # ISO, необязательно
+        toDate: null                  # ISO, необязательно
+        minAge: null                  # число, необязательно
+        hasFreeSlots: true            # необязательно
+        sortBy: date                  # date | freeSlots | createdAt (по умолчанию date)
+        sortOrder: asc                # asc | desc (по умолчанию asc)
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          events: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/EventCard" } }
+      required_fields: [events]
+
+  - id: events_details
+    name: "Карточка мероприятия"
+    required: true
+    depends_on: [events_create]
+    method: POST
+    path: /events/details
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Мероприятие не найдено" }
+    response:
+      content_type: application/json
+      schema:
+        allOf:
+          - $ref: "#/components/schemas/EventCard"
+          - type: object
+            required: [organization, freeSlots, registration, isOwner]
+            properties:
+              organization:
+                type: object
+                required: [id, name, logoUrl, isOfficial]
+                properties:
+                  id:         { type: integer }
+                  name:       { type: string }
+                  logoUrl:    { type: [string, "null"] }
+                  isOfficial: { type: boolean }
+              freeSlots:    { type: integer, minimum: 0 }
+              registration:
+                oneOf:
+                  - type: "null"
+                  - type: object
+                    required: [status, registeredAt]
+                    properties:
+                      status:       { type: string }
+                      registeredAt: { type: string, format: date-time }
+              isOwner: { type: boolean }
+      required_fields: [id, name, eventDate, status, organization.id, freeSlots, registration, isOwner]
+
+  - id: events_organization_profile
+    name: "Публичный профиль организации"
+    required: false
+    depends_on: [events_details]
+    method: POST
+    path: /events/organization-profile
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        organizationId: "${organization_id}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Организация не найдена" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          id:              { type: integer }
+          name:            { type: string }
+          description:     { type: [string, "null"] }
+          contacts:        { type: [string, "null"] }
+          socialMediaLink: { type: [string, "null"] }
+          logoUrl:         { type: [string, "null"] }
+          isOfficial:      { type: boolean }
+          city:            { type: [string, "null"] }
+          address:         { type: [string, "null"] }
+          events:          { type: array, maxItems: 10, items: { $ref: "#/components/schemas/EventCard" } }
+      required_fields: [id, name, isOfficial, events]
+
+  - id: events_register
+    name: "Запись волонтёра на мероприятие"
+    required: true
+    depends_on: [events_create]
+    method: POST
+    path: /events/register-for-event
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        eventId: "${event_id}"
+    expected_status: [201]
+    possible_errors:
+      400: "Уже записан / заявка отклонена / мероприятие завершено / нет мест / не подходит возраст"
+      401: "Невалидная подпись initData"
+      403: "Записываться могут только волонтёры"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          status: { type: string, const: pending }
+      required_fields: [status]
+
+  - id: events_my_volunteer
+    name: "Мои мероприятия (волонтёр)"
+    required: true
+    depends_on: [events_register]
+    method: POST
+    path: /events/my
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Пользователь не найден" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          role:   { type: string, const: volunteer }
+          active: { type: array, items: { $ref: "#/components/schemas/EventCard" } }
+          past:   { type: array, items: { $ref: "#/components/schemas/EventCard" } }
+      required_fields: [role, active, past]
+
+  - id: volunteer_home
+    name: "Главная страница волонтёра"
+    required: true
+    method: POST
+    path: /events/volunteer-home
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Профиль волонтёра не найден" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          daysSinceRegistration: { type: integer, minimum: 0 }
+          participationsCount:   { type: integer, minimum: 0 }
+          myEvents:              { type: array, maxItems: 3, items: { $ref: "#/components/schemas/EventCard" } }
+          recommendations:
+            type: array
+            maxItems: 6
+            items:
+              allOf:
+                - $ref: "#/components/schemas/EventCard"
+                - type: object
+                  required: [organizationName]
+                  properties: { organizationName: { type: string } }
+      required_fields: [daysSinceRegistration, participationsCount, myEvents, recommendations]
+
+  # ------------------------- Заявки и рассылки (организация) ---------
+  - id: events_my_organization
+    name: "Мои мероприятия (организация)"
+    required: true
+    depends_on: [events_register]
+    method: POST
+    path: /events/my
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 404: "Пользователь не найден" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          active: { type: array, items: { $ref: "#/components/schemas/EventCard" } }   # с pendingCount
+          past:   { type: array, items: { $ref: "#/components/schemas/EventCard" } }
+      required_fields: [active, past]
+
+  - id: organization_home
+    name: "Главная страница организации"
+    required: true
+    method: POST
+    path: /events/organization-home
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+    expected_status: [200]
+    possible_errors: { 401: "Невалидная подпись initData", 403: "Доступно только организациям" }
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          activeEventsCount:        { type: integer, minimum: 0 }
+          pendingApplicationsCount: { type: integer, minimum: 0 }
+          activeEvents:             { type: array, maxItems: 3, items: { $ref: "#/components/schemas/EventCard" } }
+          stats:
+            type: object
+            required: [fillRate, avgFillDays, repeatVolunteersPercent]
+            properties:
+              fillRate:                { type: integer, description: "процент" }
+              avgFillDays:             { type: [integer, "null"] }
+              repeatVolunteersPercent: { type: integer, description: "процент" }
+      required_fields: [activeEventsCount, pendingApplicationsCount, activeEvents, stats]
+
+  - id: events_applications
+    name: "Список заявок на мероприятие"
+    required: true
+    depends_on: [events_register]
+    method: POST
+    path: /events/applications
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Только для организаций / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          applications:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [id, status, registeredAt, volunteer]
+              properties:
+                id:           { type: integer }
+                status:       { type: string, enum: [pending, approved, rejected, completed] }
+                registeredAt: { type: string, format: date-time }
+                volunteer:
+                  type: object
+                  required: [firstName, lastName, middleName, city, address, participationsCount, phone]
+                  properties:
+                    firstName:           { type: string }
+                    lastName:            { type: string }
+                    middleName:          { type: [string, "null"] }
+                    city:                { type: [string, "null"] }
+                    address:             { type: [string, "null"] }
+                    participationsCount: { type: integer }
+                    phone:               { type: [string, "null"] }
+      required_fields: [applications, "applications[].id", "applications[].status", "applications[].volunteer"]
+
+  - id: events_applications_forbidden
+    name: "Волонтёр не видит заявки"
+    required: false
+    depends_on: [events_create]
+    method: POST
+    path: /events/applications
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        eventId: "${event_id}"
+    expected_status: [403]
+    response:
+      content_type: application/json
+      error_format: upload_filter
+      required_fields: [message]
+
+  - id: events_application_approve
+    name: "Одобрение заявки (+ уведомление волонтёру в MAX)"
+    required: true
+    depends_on: [events_applications]
+    method: POST
+    path: /events/application-action
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        registrationId: "${registration_id}"
+        action: approve                  # approve | reject
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Только для организаций / это не ваше мероприятие"
+      404: "Заявка не найдена"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          status: { type: string, enum: [approved, rejected] }
+      required_fields: [status]
+
+  - id: events_approve_all
+    name: "Одобрить все ожидающие заявки"
+    required: false
+    depends_on: [events_create]
+    method: POST
+    path: /events/applications-approve-all
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Только для организаций / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          approved: { type: integer, minimum: 0 }
+          sent:     { type: integer, minimum: 0, description: "отсутствует, если approved = 0" }
+      required_fields: [approved]
+
+  - id: events_broadcast
+    name: "Рассылка одобренным волонтёрам через бота MAX"
+    required: true
+    depends_on: [events_application_approve]
+    method: POST
+    path: /events/broadcast
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+        message: "Напоминаем: сбор в 9:45 у главного входа"
+    expected_status: [200]
+    possible_errors:
+      400: "Текст сообщения пуст"
+      401: "Невалидная подпись initData"
+      403: "Доступно только организациям / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          sent:  { type: integer, minimum: 0, description: "доставлено через MAX Bot API" }
+          total: { type: integer, minimum: 0, description: "одобренных волонтёров" }
+      required_fields: [sent, total]
+
+  - id: events_broadcast_history
+    name: "История рассылок"
+    required: false
+    depends_on: [events_broadcast]
+    method: POST
+    path: /events/broadcast-history
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Доступно только организациям / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          items:
+            type: array
+            items:
+              type: object
+              required: [id, text, sentCount, totalCount, createdAt]
+              properties:
+                id:         { type: integer }
+                text:       { type: string }
+                sentCount:  { type: integer }
+                totalCount: { type: integer }
+                createdAt:  { type: string, format: date-time }
+      required_fields: [items]
+
+  - id: events_update
+    name: "Редактирование мероприятия"
+    required: true
+    depends_on: [events_create]
+    method: POST
+    path: /events/update
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+        name: "Субботник в парке (обновлено)"
+        description: "Уборка территории парка и покраска скамеек"
+        city: "Москва"
+        address: "г Москва, ул Тверская, д 1"
+        requiredVolunteersCount: 8
+        eventDate: "2027-06-01T10:00:00+03:00"
+        endTime: "2027-06-01T15:00:00+03:00"
+      body_notes: "Обязательны: name, address, eventDate. Передаётся полный набор полей мероприятия."
+    expected_status: [200]
+    possible_errors:
+      400: "Нет адреса / даты или дата некорректна"
+      401: "Невалидная подпись initData"
+      403: "Доступно только организациям / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          id: { type: integer }
+      required_fields: [id]
+
+  # ------------------------- Отмена / удаление -----------------------
+  - id: events_cancel_registration
+    name: "Отмена записи волонтёром"
+    required: false
+    depends_on: [events_register]
+    method: POST
+    path: /events/cancel-registration
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors:
+      400: "Нельзя отменить отклонённую заявку"
+      401: "Невалидная подпись initData"
+      403: "Только для волонтёров"
+      404: "Записи не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          cancelled: { type: boolean, const: true }
+      required_fields: [cancelled]
+
+  - id: events_register_2
+    name: "Повторная запись после отмены"
+    required: false
+    depends_on: [events_cancel_registration]
+    method: POST
+    path: /events/register-for-event
+    role: volunteer
+    request:
+      body:
+        initData: "${INIT_DATA_VOLUNTEER}"
+        eventId: "${event_id}"
+    expected_status: [201]
+    response:
+      content_type: application/json
+      required_fields: [status]
+
+  - id: events_applications_2
+    name: "Список заявок (для удаления заявки)"
+    required: false
+    depends_on: [events_register_2]
+    method: POST
+    path: /events/applications
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    response:
+      content_type: application/json
+      required_fields: [applications]
+
+  - id: events_application_delete
+    name: "Удаление заявки организацией"
+    required: false
+    depends_on: [events_applications_2]
+    method: POST
+    path: /events/application-delete
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        registrationId: "${registration_id_2}"
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Только для организаций / это не ваше мероприятие"
+      404: "Заявка не найдена"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          deleted: { type: boolean, const: true }
+      required_fields: [deleted]
+
+  - id: events_delete
+    name: "Удаление мероприятия"
+    required: true
+    depends_on: [events_create]
+    run_last: true
+    method: POST
+    path: /events/delete
+    role: organization_creator
+    request:
+      body:
+        initData: "${INIT_DATA_ORGANIZATION}"
+        eventId: "${event_id}"
+    expected_status: [200]
+    possible_errors:
+      401: "Невалидная подпись initData"
+      403: "Доступно только организациям / это не ваше мероприятие"
+      404: "Мероприятие не найдено"
+    response:
+      content_type: application/json
+      schema:
+        type: object
+        properties:
+          deleted: { type: boolean, const: true }
+      required_fields: [deleted]
+
+# =====================================================================
+# Внешние интеграции (справочно, платформой оценки не вызываются)
+# =====================================================================
+integrations:
+  max_bot_api:
+    base_url: "https://platform-api2.max.ru"
+    auth: "Заголовок Authorization: <BOT_TOKEN>"
+    client_library: "@maxhub/max-bot-api"
+    used_methods:
+      - { method: GET,  path: /me,            purpose: "username бота для диплинков https://max.ru/<username>?startapp=event_<id>" }
+      - { method: POST, path: /subscriptions, purpose: "регистрация webhook, update_types: [message_created, bot_started], secret" }
+      - { method: POST, path: /messages,      query: { user_id: "<MAX user id>" }, purpose: "уведомления волонтёрам; inline-клавиатура: open_app → link → без кнопки" }
+  max_webhook:
+    description: "Входящие события от MAX (не относится к base_url /api)"
+    method: POST
+    url: "https://YOUR_DOMAIN/bot/webhook"
+    headers:
+      X-Max-Bot-Api-Secret: "${WEBHOOK_SECRET}"
+    body: "объект Update (message_created, bot_started)"
+    expected_status: [200]
+    requirements: "HTTPS, порт 443, сертификат доверенного УЦ или Минцифры, ответ за ≤ 30 с"
+  max_webapp:
+    description: "Запуск мини-приложения: initData из window.WebApp.initData, диплинк startapp=event_<id>"
+  dadata:
+    base_url: "https://suggestions.dadata.ru/suggestions/api/4_1/rs"
+    used_methods: ["POST /suggest/address", "POST /clean/address"]
+    degradation: "при сбое DaData эндпоинты /dadata/* отвечают 200 с degraded=true"

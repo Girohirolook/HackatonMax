@@ -1,0 +1,69 @@
+name: maxhack
+
+services:
+  # Мини-приложение: Vite SPA + nginx (статика + проксирование /api/ и /bot/)
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # URL API запекается в бандл Vite при сборке образа.
+        # Домен, обслуживаемый nginx сервера (443 ssl, Certbot).
+        # Переопределяется через .env рядом с docker-compose.yaml.
+        VITE_API_URL: ${VITE_API_URL}
+    image: maxhack-web:latest
+    container_name: maxhack-web
+    restart: unless-stopped
+    ports:
+      # Хостовой nginx (server_name didntthinkofdomen.online, listen 443 ssl)
+      # проксирует location / на этот порт (см. README, шаг 3).
+      - "127.0.0.1:12345:80"
+    depends_on:
+      - bot
+
+  # NestJS: REST API (/api/*) + webhook MAX-бота (/bot/webhook)
+  bot:
+    build:
+      context: .
+      dockerfile: apps/bot/Dockerfile
+    image: maxhack-bot:latest
+    container_name: maxhack-bot
+    restart: unless-stopped
+    env_file:
+      - apps/bot/.env
+    environment:
+      # DATABASE_URL из apps/bot/.env перекрывается: внутри docker-сети
+      # БД доступна по имени сервиса postgres.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-max_hack}?schema=public
+      NODE_EXTRA_CA_CERTS: /certs/russian-trusted-bundle.pem
+      # Фиксируем порт: nginx внутри web-контейнера проксирует на bot:3000
+      PORT: 3000
+    volumes:
+      - ./certs/russian-trusted-bundle.pem:/certs/russian-trusted-bundle.pem:ro
+      - ./uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: maxhack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-max_hack}
+    volumes:  
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Только loopback (администрирование с сервера); бот ходит в БД
+      # внутри docker-сети по имени postgres.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d max_hack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
